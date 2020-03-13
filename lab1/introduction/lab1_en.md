@@ -187,14 +187,11 @@ However
   Today: networks and root switches are much faster relative to CPU/disk.
 
 * Some details (paper's Figure 1):
-    one master, that hands out tasks to workers and remembers progress.
-
-  1. master gives Map tasks to workers until all Maps complete
-     Maps write output (intermediate data) to local disk
-     Maps split output, by hash, into one file per Reduce task
-  2. after all Maps have finished, master hands out Reduce tasks
-     each Reduce fetches its intermediate output from (all) Map workers
-     each Reduce task writes a separate output file on GFS
+  * one master, that hands out tasks to workers and remembers progress.
+  * master gives Map tasks to workers until all Maps complete
+  * Maps write output (intermediate data) to local disk
+  * Maps split output, by hash, into one file per Reduce task
+  * after all Maps have finished, master hands out Reduce tasks, each Reduce fetches its intermediate output from (all) Map workers, each Reduce task writes a separate output file on GFS
 
 * How does MR minimize network use?
     Master tries to run each Map task on GFS server that stores its input.
