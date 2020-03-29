@@ -265,25 +265,227 @@ Counter* uppercase;
 
 ##### 5.1 集群配置
 
+​		所有程序都在大约1800台计算机组成的集群上执行。每个机器都有两个启用了超线程的**2GHz Intel Xeon**处理器，**4GB**内存，两个**160GB IDE**磁盘和一个千兆以太网链接。机器被安排在两级树形交换网络中，根部可提供大约**100-200 Gbps**的总带宽。所有机器都位于同一托管设备中，因此每对机器之间的往返通信时间不到一毫秒。
+
+​		在**4GB**的内存中，大约有**1-1.5GB**的空间被群集上运行的其他任务保留。这些程序在周末的一个下午执行，当时**CPU**，磁盘和网络大部分处于空闲状态。
+
 ##### 5.2 搜索
+
+​		**grep**程序扫描了$10^{10}$个**100**字节的记录，搜索了一个相对罕见的三字符模式（该模式出现在**92337**条记录中）。输入分为大约**64MB**（**M = 15000**），整个输出放在一个文件中（**R = 1**）。
+
+​		**图2**显示了随着时间推移的计算进度。Y轴显示扫描输入数据的速率。随着将更多计算机分配给此**MapReduce**计算，速率逐渐提高，并且当分配了1764个**worker**时，峰值速率超过**30 GB / s**。 随着**map**任务的完成，速率开始下降，并在计算大约**80秒**时达到零。从开始到结束，整个计算大约需要150秒。这包括大约一分钟的启动开销。这包括大约一分钟的启动开销。 开销是由于程序传播到所有工作机，以及与GFS进行交互以打开1000个输入文件集并获取位置优化所需的信息而导致的。
+
+![计算进度](./Data transfer rate over time.jpg "图2")
 
 ##### 5.3 排序
 
+​		排序程序对$10^{10}$个**100**字节的记录（大约**1 TB**的数据）进行排序。 该程序以**TeraSort**基准**[10]**为模型。
+
+​		排序程序由少于**50**行的用户代码组成。三行**Map**函数从文本行中提取10字节的排序键，并将该键和原始文本行作为中间键/值对发出。我们使用内置的**Identity**函数作为**Reduce**运算符。此函数传递不变的中间键/值对作为输出键/值对。将最终排序的输出写入一组双向复制的GFS文件（即，将2 TB作为程序的输出写入）。
+
+​		和以前一样，输入数据被分成**64MB**（**M = 15000**）。我们将排序后的输出分为**4000**个文件（**R = 4000**）。分区函数使用**key**的初始字节将其分到**R**个片段中。
+
+​		我们针对该基准的分区函数已内置了**key**分配的知识。在一般的排序程序中，我们将添加一个**Prepass MapReduce**操作，该操作将收集键的样本并使用采样的键的分布来计算最终排序过程的分割点。
+
+​		图3（a）显示了排序程序正常执行的进度。左上图显示了读取输入的速率。由于所有**map**任务在**200秒**之前完成，因此速率达到约**13 GB / s**的峰值并很快消失。请注意，输入速率小于**grep**。这是因为排序映射任务花费大约一半的时间和**I / O**带宽将中间输出写入其本地磁盘。**grep**的相应中间输出的大小可以忽略不计。
+
+![排序](./ Data transfer rates over time for different executions of the sort program.jpg "图三")
+
+​		左中图显示了通过网络将数据从**map**任务发送到**reduce**任务的速率。第一个**map**任务完成后，即开始此混洗。图中的第一个驼峰是针对第一批约**1700**个**reduce**任务（整个**MapReduce**被分配了约**1700**台计算机，每台计算机一次最多执行一个**reduce**任务）。大约需要300秒，这些第一批**reduce**任务中的一些完成了，我们开始为剩余的**reduce**任务改组数据。所有改组大约在600秒后完成。
+
+​		左下图显示了由**reduce**任务将排序后的数据写入最终输出文件的速率。在第一个混洗周期结束与写入周期开始之间存在延迟，因为机器正忙于对中间数据进行排序。写入以约**2-4 GB / s**的速率持续一段时间。所有写操作都需要大约850秒才能完成。包括启动开销，整个计算需要891秒。这与TeraSort基准测试[18]的当前报告的1057秒的最佳结果相似。
+
+​		需要注意的几件事：由于我们的位置优化，输入速率高于混洗速率和输出速率––大多数数据是从本地磁盘读取的，并且绕过了带宽相对受限的网络。混洗率高于输出率，因为输出阶段会写入已排序数据的两个副本（出于可靠性和可用性的原因，我们对输出做了两个副本）。我们编写两个副本是因为这是基础文件系统提供的可靠性和可用性机制。如果底层文件系统使用擦除编码[14]而不是复制，则写入数据的网络带宽要求将降低。
+
 ##### 5.4 任务备份的效果
+
+​		在图3（b）中，我们显示了禁用备份任务的排序程序的执行。执行流程类似于图3（a）所示，除了尾巴很长，几乎没有写操作发生。960秒后除5个**reduce**任务外的所有任务均已完成。 但是最后的几个落后任务直到300秒后才结束。整个计算需要1283秒，经过时间增加了44％。
 
 ##### 5.5 机器故障
 
+​		在图3（c）中，我们显示了排序程序的执行，在此程序中，我们有意在几分钟内杀死了1746个工作进程中的200个。底层的群集调度程序立即在这些计算机上重新启动了新的工作进程（由于仅杀死了进程，因此计算机仍在正常运行）。
+
+​		由于先前完成的一些**map**工作消失了（因为相应的**map worker**被杀），因此**worker**死亡以负输入率显示，需要重做。此**map**工作的重新执行相对较快。整个计算完成了933秒，包括启动开销（仅比正常执行时间增加5％）。
+
 #### 6. 经验
+
+​		我们在2003年2月编写了**MapReduce**库的第一个版本，并在2003年8月对其进行了重大增强，包括局部性优化，跨工作机执行任务的动态负载平衡等。从那时起，我们对MapReduce库在我们处理的各种问题上的广泛应用感到惊讶。 它已在Google的广泛领域中使用，包括：
+
+* 大规模的机器学习问题
+* Google新闻和Froogle产品
+* 提取用于生成热门查询报告的数据（例如Google Zeitgeist）
+* 提取用于新实验和新产品的网页的属性（例如，从大量网页中提取地理位置以进行本地搜索）
+* 大规模图计算
+
+![MapReduce instances over time](./MapReduce instances over time.jpg "图四")
+
+![MapReduce jobs run in August 2004](./Table 1.jpg "表一")
+
+​		图4显示，随着时间的推移，进入我们的主要源代码管理系统的单独**MapReduce**程序的数量显着增长，从2003年初的0增长到2004年9月下旬的近900个独立实例。**MapReduce**之所以如此成功，是因为它使得编写一个简单的程序并在半小时内在一千台计算机上高效运行它成为可能，从而极大地加快了开发和原型开发的周期。此外，它使没有分布式和/或并行系统经验的程序员可以轻松利用大量资源。
+
+​		在每个作业结束时，**MapReduce**库记录有关该作业使用的计算资源的统计信息。 在表1中，我们显示了2004年8月在**Google**运行的一部分**MapReduce**作业的统计信息。
 
 ##### 6.1 大规模索引
 
-#### 7. 相关工作
+​		迄今为止，**MapReduce**最重要的用途之一就是完全重写了生产索引系统，该系统生成了用于**Google Web**搜索服务的数据结构。索引系统将由我们的爬虫系统检索的大量文档作为输入，存储为一组**GFS**文件。这些文档的原始内容超过**20 TB**的数据。索引过程按五到十个**MapReduce**操作的顺序运行。使用**MapReduce**（而不是索引系统的先前版本中的即时分布式通行证）提供了许多好处。
+
+* 索引代码更简单，更小且更易于理解，因为处理容错，分布和并行化的代码隐藏在**MapReduce**库中。例如，使用**MapReduce**表示时，计算的一个阶段的C ++代码从大约3800行减少到大约700行。
+* **MapReduce**库的性能足够好，以至于我们可以将概念上无关的计算分开，而不必将它们混合在一起以避免对数据的额外传递。这使更改索引过程变得容易。例如，对旧索引系统进行的一项更改花费了几个月的时间，而在新系统中实施仅花费了几天的时间。
+* 索引过程变得更加容易操作，因为由机器故障、机器速度慢、网络故障引起的大多数问题都是由**MapReduce**库自动处理的，而无需操作员干预。此外通过在索引集群中添加新机器，很容易提高索引处理的性能。
+
+#### 7. 相关特性
+
+​		许多系统提供了受限制的编程模型，并使用这些限制来自动并行化计算。例如，可以使用并行前缀计算[6、9、13]在N个处理器上以$log^{n}$时间在N个元素数组的所有前缀上计算关联函数。根据我们在大型现实计算中的经验，可以将**MapReduce**视为其中某些模型的简化和提炼。更重要的是，我们提供了可扩展到数千个处理器的容错实现。相反大多数并行处理系统仅在较小的规模上实现，而处理机器故障的细节则留给程序员。
+
+​		批量同步编程[17]和一些MPI原语[11]提供了更高级别的抽象，使程序员更容易编写并行程序。这些系统与**MapReduce**之间的主要区别在于，**MapReduce**利用受限的编程模型来自动并行化用户程序并提供透明的容错能力。我们的位置优化是从诸如活动磁盘[12，15]之类的技术中汲取灵感的，这些技术将计算推入到靠近本地磁盘的处理元素中，以减少跨I / O子系统或网络发送的数据量。我们在直接连接少量磁盘的商品处理器上运行，而不是在磁盘控制器处理器上直接运行，但是一般方法是相似的。
+
+​		我们的备份任务机制类似于夏洛特系统[3]中采用的急切调度机制。简单的快速调度的缺点之一是，如果给定任务导致重复失败，则整个计算将无法完成。我们使用跳过不良记录的机制来修复此问题的某些实例。
+
+​		**MapReduce**实现依赖于内部集群管理系统，该系统负责在大量共享计算机上分发和运行用户任务。尽管不是本文的重点，但是集群管理系统在本质上与其他系统类似，例如**Condor** [16]。
+
+​		作为**MapReduce**库一部分的排序工具在操作上与NOW-Sort [1]类似。源计算机（**map**工作者）对要排序的数据进行分区，并将其发送到**R**个 **reduce**工作者中的一个上。每个**reduce worker**在本地对数据进行排序（如果可能，在内存中）。当然**NOW-Sort**没有用户可定义的**Map**和**Reduce**函数，这些函数使我们的库广泛适用。
+
+​		**River** [2]提供了一种编程模型，其中进程通过在分布式队列上发送数据来相互通信。与**MapReduce**一样，**River**系统也试图提供良好的平均性能，即使在异构硬件或系统扰动引起的不均匀性的情况下。**River**通过仔细计划磁盘和网络传输以实现平衡完成时间来实现这一目标。**MapReduce**有不同的方法。通过限制编程模型，**MapReduce**框架能够将问题划分为大量细粒度的任务。这些任务会动态安排在可用的**worker**上，以便更快的**worker**处理更多任务。受限的编程模型还使我们能够在作业快要结束时安排任务的冗余执行，这在存在不均匀性（例如工作缓慢或卡住的**worker**）的情况下大大减少了完成时间。
+
+​		**BAD-FS** [5]的编程模型与**MapReduce**完全不同，并且与**MapReduce**不同，**BAD-FS**的目标是跨广域网执行作业。但是有两个基本相似之处。（1）两个系统都使用冗余执行来恢复由于故障导致的数据丢失。（2）两者都使用位置感知调度来减少通过拥塞的网络链路发送的数据量。
+
+​		**TACC** [7]是一个旨在简化高可用性网络服务的构建系统。与**MapReduce**一样，它依赖于重新执行作为实现容错的机制。
 
 #### 8. 结论
 
+​		**MapReduce**编程模型已在**Google**成功用于许多不同目的。我们将此成功归因于几个原因。首先，该模型易于使用，即使对于没有并行和分布式系统经验的程序员来说也是如此，因为该模型隐藏了并行化、容错、局部性优化和负载平衡的细节。其次，各种各样的问题可以很容易地表达为**MapReduce**计算。例如，**MapReduce**用于为**Google**的生产网络搜索服务生成数据、排序、数据挖掘、机器学习和许多其他系统。第三，我们开发了**MapReduce**的实现，该实现可扩展到包含数千台机器的大型机器集群。该实现有效利用了这些机器资源，因此适合用于**Google**遇到的许多大型计算问题。
+
+​		我们从这项工作中学到了几件事。首先，限制编程模型使其易于并行化和分布计算，并使此类计算具有容错性。其次，网络带宽是一种稀缺资源。因此，我们系统中的许多优化旨在减少通过网络发送的数据量：首先位置优化使我们能够从本地磁盘读取数据；其次可将中间数据的单个副本写入本地磁盘可节省网络带宽；最后冗余执行可以用来减少慢速机器的影响，并处理机器故障和数据丢失。
+
 #### 致谢
 
+​		**Josh Levenberg**在使用**MapReduce**的经验以及其他人的改进建议基础上，添加了许多新功能，对修订和扩展用户级**MapReduce API**起到了重要作用。**MapReduce**从其读取输入，并将其输出写入**Google File System** [8]。我们要感谢**Mohit Aron**，**Howard Gobioff**，**Markus Gutschke**，**David Kramer**，**Shun-Tak Leung**和**Josh Redstone**在开发**GFS**方面所做的工作。我们还要感谢**Percy Liang**和**Olcan Sercinoglu**在开发**MapReduce**使用的集群管理系统方面所做的工作。**Mike Burrows**，**Wilson Hsieh**，**Josh Levenberg**，**Sharon Perl**，**Rob Pike**和**Debby Wallach**对本文件的初稿提出了有益的建议。匿名的**OSDI**审稿人，以及我们的领导**Eric Brewer**，就可以改进本文的领域提供了许多有用的建议。最后，我们感谢**Google**工程组织中所有**MapReduce**用户，他们提供了有用的反馈，建议和错误报告。
+
 #### 引用
+
+[1] Andrea C. Arpaci-Dusseau, Remzi H. Arpaci-Dusseau, David E. Culler, Joseph M. Hellerstein, and David A. Pat- terson. High-performance sorting on networks of workstations. In *Proceedings of the 1997 ACM SIGMOD In- ternational Conference on Management of Data*, Tucson, Arizona, May 1997.
+
+[2] Remzi H. Arpaci-Dusseau, Eric Anderson, Noah Treuhaft, David E. Culler, Joseph M. Hellerstein, David Patterson, and Kathy Yelick. Cluster I/O with River: Making the fast case common. In *Proceedings of the Sixth Workshop on Input/Output in Parallel and Distributed Systems (IOPADS ’99)*, pages 10–22, Atlanta, Georgia, May 1999.
+
+[3] Arash Baratloo, Mehmet Karaul, Zvi Kedem, and Peter Wyckoff. Charlotte: Metacomputing on the web. In *Proceedings of the 9th International Conference on Parallel and Distributed Computing Systems*, 1996.
+
+[4] Luiz A. Barroso, Jeffrey Dean, and Urs Ho ̈lzle. Web search for a planet: The Google cluster architecture. *IEEE Micro*, 23(2):22–28, April 2003.
+
+[5] John Bent, Douglas Thain, Andrea C.Arpaci-Dusseau, Remzi H. Arpaci-Dusseau, and Miron Livny. Explicit control in a batch-aware distributed file system. In *Proceedings of the 1st USENIX Symposium on Networked Systems Design and Implementation NSDI*, March 2004.
+
+[6] Guy E. Blelloch. Scans as primitive parallel operations. *IEEE Transactions on Computers*, C-38(11), November 1989.
+
+[7] Armando Fox, Steven D. Gribble, Yatin Chawathe, Eric A. Brewer, and Paul Gauthier. Cluster-based scal- able network services. In *Proceedings of the 16th ACM Symposium on Operating System Principles*, pages 78– 91, Saint-Malo, France, 1997.
+
+[8] Sanjay Ghemawat, Howard Gobioff, and Shun-Tak Le- ung. The Google file system. In *19th Symposium on Op- erating Systems Principles*, pages 29–43, Lake George, New York, 2003.
+
+[9]  S. Gorlatch. Systematic efficient parallelization of scan and other list homomorphisms. In L. Bouge, P. Fraigni- aud, A. Mignotte, and Y. Robert, editors, *Euro-Par’96. Parallel Processing*, Lecture Notes in Computer Science 1124, pages 401–408. Springer-Verlag, 1996.
+
+[10]  Jim Gray. Sort benchmark home page. http://research.microsoft.com/barc/SortBenchmark/.
+
+[11]  William Gropp, Ewing Lusk, and Anthony Skjellum.
+
+*Using MPI: Portable Parallel Programming with the Message-Passing Interface*. MIT Press, Cambridge, MA, 1999.
+
+[12]  L. Huston, R. Sukthankar, R. Wickremesinghe, M. Satya- narayanan, G. R. Ganger, E. Riedel, and A. Ailamaki. Diamond: A storage architecture for early discard in inter- active search. In *Proceedings of the 2004 USENIX File and Storage Technologies FAST Conference*, April 2004.
+
+[13]  Richard E. Ladner and Michael J. Fischer. Parallel prefix computation. *Journal of the ACM*, 27(4):831–838, 1980.
+
+[14]  Michael O. Rabin. Efficient dispersal of information for security, load balancing and fault tolerance. *Journal of the ACM*, 36(2):335–348, 1989.
+
+[15]  Erik Riedel, Christos Faloutsos, Garth A. Gibson, and David Nagle. Active disks for largescale data processing. *IEEE Computer*, pages 68–74, June 2001.
+
+[16]  Douglas Thain, Todd Tannenbaum, and Miron Livny. Distributed computing in practice: The Condor experience. *Concurrency and Computation: Practice and Experience*, 2004.
+
+[17]  L.G.Valiant.Abridgingmodelforparallelcomputation. *Communications of the ACM*, 33(8):103–111, 1997.
+
+[18]  Jim Wyllie. Spsort: How to sort a terabyte quickly. http://alme1.almaden.ibm.com/cs/spsort.pdf.
+
+#### 附录A
+
+​		本节包含一个程序，该程序对在命令行上指定的一组输入文件中每个唯一单词的出现次数进行统计。
+
+```c++
+#include "mapreduce/mapreduce.h"
+// User’s map function
+class WordCounter : public Mapper {
+ public:
+  virtual void Map(const MapInput& input) {
+		const string& text = input.value(); 
+    const int n = text.size();
+		for (int i = 0; i < n; ) {
+      // Skip past leading whitespace
+      while ((i < n) && isspace(text[i]))
+				i++;
+      // Find word end
+      int start = i;
+      while ((i < n) && !isspace(text[i]))
+				i++;
+      if (start < i) 
+        Emit(text.substr(start,i-start),"1");
+		} 
+  }
+}; 
+REGISTER_MAPPER(WordCounter);
+
+// User’s reduce function
+class Adder : public Reducer {
+  virtual void Reduce(ReduceInput* input) {
+    // Iterate over all entries with the
+    // same key and add the values
+    int64 value = 0;
+		while (!input->done()) {
+			value += StringToInt(input->value()); 
+      input->NextValue();
+		}
+		// Emit sum for input->key()
+    Emit(IntToString(value));
+  }
+}; 
+REGISTER_REDUCER(Adder);
+
+int main(int argc, char** argv) {
+  ParseCommandLineFlags(argc, argv);
+  
+  MapReduceSpecification spec;
+  
+  // Store list of input files into "spec"
+  for (int i = 1; i < argc; i++) {
+		MapReduceInput* input = spec.add_input(); 
+    input->set_format("text"); 
+    input->set_filepattern(argv[i]); 
+    input->set_mapper_class("WordCounter");
+	}
+
+	//	Specify the output files: 
+	//  		/gfs/test/freq-00000-of-00100 
+	//      /gfs/test/freq-00001-of-00100 
+	//      ...
+  
+	MapReduceOutput* out = spec.output(); 
+  out->set_filebase("/gfs/test/freq"); 
+  out->set_num_tasks(100); 
+  out->set_format("text"); 
+  out->set_reducer_class("Adder");
+  
+	// Optional: do partial sums within map 
+	// tasks to save network bandwidth out->set_combiner_class("Adder");
+  
+	// Tuning parameters: use at most 2000
+	// machines and 100 MB of memory per task 
+  spec.set_machines(2000); 
+  spec.set_map_megabytes(100); 
+  spec.set_reduce_megabytes(100);
+  
+	// Now run it
+  MapReduceResult result;
+  if (!MapReduce(spec, &result)) abort();
+	// Done: ’result’ structure contains info 
+  // about counters, time taken, number of 
+  // machines used, etc.
+	return 0; 
+}
+```
 
 
 
